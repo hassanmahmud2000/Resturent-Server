@@ -8,6 +8,7 @@ const port = process.env.PORT || 5000;
 // const origin = ["http://localhost:5173"];
 app.use(cors());
 app.use(express.json());
+const stripe = require("stripe")(process.env.PAYMENT_SECRET);
 
 // require('crypto').randomBytes(64).toString('hex') // Token Make Command
 
@@ -23,7 +24,7 @@ const client = new MongoClient(uri, {
 
 // Middelwear
 const verifyToken = async (req, res, next) => {
-  console.log("From VerifyToken", req.headers.authorization);
+  // console.log("From VerifyToken", req.headers.authorization);
 
   if (!req.headers.authorization) {
     return res.status(401).send({ massage: "UnAuthorized Access" });
@@ -36,9 +37,7 @@ const verifyToken = async (req, res, next) => {
     req.decode = decode;
     next();
   });
-};
-
-
+}
 
 async function run() {
   try {
@@ -49,6 +48,7 @@ async function run() {
     const menuCollection = client.db("BistroDB").collection("Menu");
     const reviewCollection = client.db("BistroDB").collection("Review");
     const cartsCollection = client.db("BistroDB").collection("Carts");
+    const paymentCollection = client.db("BistroDB").collection("payments");
 
     // JWT Related API
 
@@ -63,16 +63,60 @@ async function run() {
     const verifyAdmin = async (req, res, next) => {
       const email = req.decode.email;
       const query = { email: email };
-      const user = await userCollection.findOne(query)
-      const isAdmin = user.role === 'Admin'
-      if(isAdmin){
+      const user = await userCollection.findOne(query);
+      const isAdmin = user.role === "Admin";
+      if (isAdmin) {
         return res.status(403).send({ massage: "forbidden Access" });
       }
-      next()
+      next();
     };
+    // payment intent
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body;
+      const amount = parseFloat(price * 100);
+      console.log(amount, 'amount inside the intent')
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    });
+
+    app.get ('/payments/:email', verifyToken, async (req, res) => {
+      const query = { email: req.params.email }
+      // if (req.params.email !== req.decoded.email) {
+      //   return res.status(403).send({ message: 'forbidden access' });
+      // }
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    })
+
+
+    app.post('/payments', async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      //  carefully delete each item from the cart
+      console.log('payment info', payment);
+      const query = {
+        _id: {
+          $in: payment.cartIds.map(id => new ObjectId(id))
+        }
+      };
+
+      const deleteResult = await cartsCollection.deleteMany(query);
+
+      res.send({ paymentResult, deleteResult });
+    })
+    
 
     // User API
-    app.post("/users",verifyToken,verifyAdmin, async (req, res) => {
+    app.post("/users", async (req, res) => {
       const user = req.body;
       const query = { email: user.email };
       const existingUser = await userCollection.findOne(query);
@@ -102,7 +146,7 @@ async function run() {
       res.send({ admin });
     });
 
-    app.delete("/users/:id", verifyToken,verifyAdmin, async (req, res) => {
+    app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await userCollection.deleteOne(query);
@@ -110,23 +154,49 @@ async function run() {
     });
 
     // Changing The Role Make Admin from Common User
-    app.patch("/users/admin/:id",verifyToken, verifyAdmin, async (req, res) => {
-      const id = req.params.id;
-      const filter = { _id: new ObjectId(id) };
-      const updatedDoc = {
-        $set: {
-          role: "Admin",
-        },
-      };
-      const result = await userCollection.updateOne(filter, updatedDoc);
+    app.patch(
+      "/users/admin/:id",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            role: "Admin",
+          },
+        };
+        const result = await userCollection.updateOne(filter, updatedDoc);
+        res.send(result);
+      }
+    );
+
+    // Data API
+    app.post("/menu", verifyToken, async (req, res) => {
+      const menu = req.body;
+      const result = await menuCollection.insertOne(menu);
       res.send(result);
     });
 
-    // Data API
     app.get("/menu", async (req, res) => {
       const result = await menuCollection.find().toArray();
       res.send(result);
     });
+
+    app.get("/menu/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.delete("/menu/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.deleteOne(query);
+      res.send(result);
+    });
+
     app.get("/review", async (req, res) => {
       const result = await reviewCollection.find().toArray();
       res.send(result);
