@@ -50,6 +50,41 @@ async function run() {
     const cartsCollection = client.db("BistroDB").collection("Carts");
     const paymentCollection = client.db("BistroDB").collection("payments");
 
+    // use verify admin after verifyToken
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email };
+      const user = await userCollection.findOne(query);
+      const isAdmin = user?.role === 'Admin';
+      if (!isAdmin) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      next();
+    }
+
+    // Data Count For Admin
+    app.get('/admin-stats', async(req,res)=>{
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+      // const payments = await paymentCollection.find().toArray();
+      // const revenue = payments.reduce((total,payment)=> total+payment.price,0)
+     
+      const result = await paymentCollection.aggregate([
+        {
+          $group:{
+            _id:null,
+            totalRevenue:{
+              $sum:'$price'
+            }
+          }
+        }
+      ]).toArray();
+      const revenue = result.length >0 ?result[0].totalRevenue : 0;
+      res.send({users , menuItems , orders ,revenue})
+    })
+
+
     // JWT Related API
 
     app.post("/jwt", async (req, res) => {
@@ -60,16 +95,6 @@ async function run() {
       res.send({ token });
     });
 
-    const verifyAdmin = async (req, res, next) => {
-      const email = req.decode.email;
-      const query = { email: email };
-      const user = await userCollection.findOne(query);
-      const isAdmin = user.role === "Admin";
-      if (isAdmin) {
-        return res.status(403).send({ massage: "forbidden Access" });
-      }
-      next();
-    };
     // payment intent
     app.post('/create-payment-intent', async (req, res) => {
       const { price } = req.body;
@@ -221,6 +246,43 @@ async function run() {
       const result = await cartsCollection.deleteOne(query);
       res.send(result);
     });
+
+    // Payments /Orders Item get with price
+
+    app.get('/order-stats',async (req,res)=>{
+      const result = await paymentCollection.aggregate([
+        {
+          $unwind:'$menuItemIds'
+        },
+        {
+          $lookup:{
+            from:'/menu',
+            localField:'menuItemIds',
+            foreignField:'_id',
+            as:'menuItems'
+          }
+        },
+        {
+          $unwind: '$menuItems'
+        },
+        // {
+        //   $group: {
+        //     _id: '$menuItems.category',
+        //     quantity:{ $sum: 1 },
+        //     revenue: { $sum: '$menuItems.price'} 
+        //   }
+        // },
+        // {
+        //   $project: {
+        //     _id: 0,
+        //     category: '$_id',
+        //     quantity: '$quantity',
+        //     revenue: '$revenue'
+        //   }
+        // }
+      ]).toArray();
+      res.send(result)
+    })
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
